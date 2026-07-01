@@ -256,13 +256,17 @@
       <div class="empty" id="emptyState" style="display:none;">No tasks here. Add one above.</div>
     </div>
 
-    <footer>Tasks are saved locally in your browser.</footer>
+    <footer>Tasks are synced live via Supabase.</footer>
   </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function () {
-  const STORAGE_KEY = 'taskflow.tasks.v1';
-  let tasks = load();
+  const SUPABASE_URL = 'https://rvfvvuclkxaynzncpiav.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ2ZnZ2dWNsa3hheW56bmNwaWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5MDIxNzEsImV4cCI6MjA5ODQ3ODE3MX0.esQ8Lr2TRcXxgPjp-kEGKkmzF4dFkIbj7-UDht6ItSU';
+  const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  let tasks = [];
   let filter = 'all';
 
   const form = document.getElementById('taskForm');
@@ -273,22 +277,21 @@
   const emptyState = document.getElementById('emptyState');
   const filterBtns = document.querySelectorAll('.filters button[data-filter]');
   const clearDoneBtn = document.getElementById('clearDone');
+  const addBtn = form.querySelector('button[type="submit"]');
 
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch (e) {
-      return [];
+  async function fetchTasks() {
+    const { data, error } = await db
+      .from('tasks')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error(error);
+      emptyState.textContent = 'Could not load tasks: ' + error.message;
+      emptyState.style.display = 'block';
+      return;
     }
-  }
-
-  function save() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
-  }
-
-  function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    tasks = data;
+    render();
   }
 
   function isOverdue(task) {
@@ -316,7 +319,7 @@
 
     filtered
       .slice()
-      .sort((a, b) => a.done - b.done || b.createdAt - a.createdAt)
+      .sort((a, b) => a.done - b.done || new Date(b.created_at) - new Date(a.created_at))
       .forEach(task => {
         const li = document.createElement('li');
         li.className = 'task' + (task.done ? ' done' : '');
@@ -343,40 +346,47 @@
     document.getElementById('statPending').textContent = tasks.filter(t => !t.done).length;
   }
 
-  form.addEventListener('submit', e => {
+  form.addEventListener('submit', async e => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    tasks.push({
-      id: uid(),
+
+    addBtn.disabled = true;
+    const { error } = await db.from('tasks').insert({
       text,
       done: false,
       priority: prioritySelect.value,
-      due: dueInput.value || null,
-      createdAt: Date.now()
+      due: dueInput.value || null
     });
+    addBtn.disabled = false;
+
+    if (error) {
+      console.error(error);
+      alert('Could not add task: ' + error.message);
+      return;
+    }
     input.value = '';
     dueInput.value = '';
     prioritySelect.value = 'medium';
-    save();
-    render();
     input.focus();
+    await fetchTasks();
   });
 
-  list.addEventListener('click', e => {
+  list.addEventListener('click', async e => {
     const li = e.target.closest('li.task');
     if (!li) return;
     const id = li.dataset.id;
 
     if (e.target.classList.contains('checkbox')) {
       const task = tasks.find(t => t.id === id);
-      if (task) task.done = !task.done;
-      save();
-      render();
+      if (!task) return;
+      const { error } = await db.from('tasks').update({ done: !task.done }).eq('id', id);
+      if (error) { console.error(error); alert('Could not update task: ' + error.message); return; }
+      await fetchTasks();
     } else if (e.target.classList.contains('icon-btn')) {
-      tasks = tasks.filter(t => t.id !== id);
-      save();
-      render();
+      const { error } = await db.from('tasks').delete().eq('id', id);
+      if (error) { console.error(error); alert('Could not delete task: ' + error.message); return; }
+      await fetchTasks();
     }
   });
 
@@ -388,13 +398,20 @@
     });
   });
 
-  clearDoneBtn.addEventListener('click', () => {
-    tasks = tasks.filter(t => !t.done);
-    save();
-    render();
+  clearDoneBtn.addEventListener('click', async () => {
+    const { error } = await db.from('tasks').delete().eq('done', true);
+    if (error) { console.error(error); alert('Could not clear completed tasks: ' + error.message); return; }
+    await fetchTasks();
   });
 
-  render();
+  fetchTasks();
+
+  db.channel('tasks-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, payload => {
+      console.log('Realtime event received:', payload);
+      fetchTasks();
+    })
+    .subscribe(status => console.log('Realtime channel status:', status));
 })();
 </script>
 </body>
